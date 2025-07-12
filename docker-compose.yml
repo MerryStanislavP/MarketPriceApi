@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    container_name: marketdb
+    environment:
+      POSTGRES_DB: marketdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - market-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: marketredis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - market-network
+
+  # Market Price API
+  marketapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: marketapi
+    ports:
+      - "5000:80"
+      - "5001:443"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__DefaultConnection=Host=postgres;Port=5432;Database=marketdb;Username=postgres;Password=123
+      - ConnectionStrings__Redis=redis:6379
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - market-network
+    volumes:
+      - ./MarketPriceApi/appsettings.json:/app/appsettings.json:ro
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  market-network:
+    driver: bridge 
