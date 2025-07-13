@@ -4,6 +4,8 @@ using MarketPriceApi.Services.Assets;
 using MarketPriceApi.Services.Prices;
 using MarketPriceApi.Services.Sync;
 using MarketPriceApi.Services.WebSocket;
+using MarketPriceApi.Models.DTOs;
+using MarketPriceApi.Services.Auth;
 
 namespace MarketPriceApi.Controllers
 {
@@ -45,16 +47,24 @@ namespace MarketPriceApi.Controllers
             return Ok(assets);
         }
 
-        // GET: api/marketdata/prices/current/{symbol}
-        [HttpGet("prices/current/{symbol}")]
-        public async Task<IActionResult> GetCurrentPrice(
-            string symbol,
+        // GET: api/marketdata/assets/{id}/price
+        [HttpGet("assets/{id}/price")]
+        public async Task<IActionResult> GetAssetPrice(
+            Guid id,
             [FromQuery] string provider,
             [FromQuery] string interval = "1m")
         {
+            // Сначала получаем актив по ID
+            var assetsQuery = new GetAssetsQuery { IsActive = true };
+            var assets = await _mediator.Send(assetsQuery);
+            var asset = assets.FirstOrDefault(a => a.Id == id);
+
+            if (asset == null)
+                return NotFound($"Asset with ID {id} not found");
+
             var query = new GetCurrentPriceQuery
             {
-                Symbol = symbol,
+                Symbol = asset.Symbol,
                 Provider = provider,
                 Interval = interval
             };
@@ -62,9 +72,32 @@ namespace MarketPriceApi.Controllers
             var price = await _mediator.Send(query);
             
             if (price == null)
-                return NotFound($"Price not found for symbol {symbol}");
+                return NotFound($"Price not found for asset {asset.Symbol}");
 
             return Ok(price);
+        }
+
+        // GET: api/marketdata/prices
+        [HttpGet("prices")]
+        public async Task<IActionResult> GetPrices(
+            [FromQuery] string ids,
+            [FromQuery] string provider,
+            [FromQuery] string interval = "1m")
+        {
+            if (string.IsNullOrEmpty(ids))
+                return BadRequest("ids parameter is required");
+
+            var symbols = ids.Split(',').Select(s => s.Trim()).ToList();
+            
+            var query = new GetMultiplePricesQuery
+            {
+                Symbols = symbols,
+                Provider = provider,
+                Interval = interval
+            };
+
+            var prices = await _mediator.Send(query);
+            return Ok(prices);
         }
 
         // GET: api/marketdata/prices/historical/{symbol}
@@ -99,7 +132,27 @@ namespace MarketPriceApi.Controllers
         public async Task<IActionResult> SavePrice([FromBody] SavePriceCommand command)
         {
             var priceId = await _mediator.Send(command);
-            return CreatedAtAction(nameof(GetCurrentPrice), new { symbol = command.Symbol }, new { Id = priceId });
+            return CreatedAtAction(nameof(GetHistoricalPrices), new { symbol = command.Symbol }, new { Id = priceId });
+        }
+
+        // POST: api/marketdata/sync/historical
+        [HttpPost("sync/historical")]
+        public async Task<IActionResult> SyncHistorical(
+            [FromQuery] string? symbol,
+            [FromQuery] string? provider,
+            [FromQuery] string interval = "1m",
+            [FromQuery] int days = 30)
+        {
+            if (!string.IsNullOrEmpty(symbol))
+            {
+                await _syncService.SyncPricesForSymbolAsync(symbol, provider ?? "oanda", interval);
+                return Ok(new { Message = $"Historical prices synced for {symbol}" });
+            }
+            else
+            {
+                await _syncService.SyncAllActiveAssetsAsync();
+                return Ok(new { Message = "All historical prices synchronized" });
+            }
         }
 
         // POST: api/marketdata/sync/instruments
@@ -155,6 +208,40 @@ namespace MarketPriceApi.Controllers
         {
             await _webSocketService.SubscribeToSymbolAsync(symbol, provider);
             return Ok(new { Message = $"Subscribed to {symbol}" });
+        }
+
+        // GET: api/marketdata/websocket/status
+        [HttpGet("websocket/status")]
+        public IActionResult GetWebSocketStatus()
+        {
+            return Ok(new { 
+                IsConnected = _webSocketService.IsConnected,
+                Message = _webSocketService.IsConnected ? "WebSocket is connected and receiving data" : "WebSocket is not connected"
+            });
+        }
+
+        // GET: api/marketdata/test/auth
+        [HttpGet("test/auth")]
+        public async Task<IActionResult> TestAuth()
+        {
+            try
+            {
+                var authService = HttpContext.RequestServices.GetRequiredService<FintaAuthService>();
+                var token = await authService.GetAccessTokenAsync();
+                return Ok(new { 
+                    Success = true, 
+                    TokenPrefix = token.Substring(0, Math.Min(20, token.Length)) + "...",
+                    Message = "Authentication successful"
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { 
+                    Success = false, 
+                    Error = ex.Message,
+                    Message = "Authentication failed"
+                });
+            }
         }
     }
 } 

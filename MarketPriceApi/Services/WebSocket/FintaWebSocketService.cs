@@ -2,6 +2,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using MarketPriceApi.Services.Prices;
+using MarketPriceApi.Services.Auth;
 using MediatR;
 using Microsoft.Extensions.Logging;
 
@@ -9,18 +10,24 @@ namespace MarketPriceApi.Services.WebSocket
 {
     public class FintaWebSocketService
     {
-        private readonly string _webSocketUrl;
+        private readonly string _baseWebSocketUrl;
         private readonly IMediator _mediator;
         private readonly ILogger<FintaWebSocketService> _logger;
+        private readonly FintaAuthService _authService;
         private ClientWebSocket? _webSocket;
         private CancellationTokenSource? _cancellationTokenSource;
         private bool _isConnected = false;
-
-        public FintaWebSocketService(string webSocketUrl, IMediator mediator, ILogger<FintaWebSocketService> logger)
+        private readonly List<string> _defaultSymbols = new()
         {
-            _webSocketUrl = webSocketUrl;
+            "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD"
+        };
+
+        public FintaWebSocketService(string webSocketUrl, IMediator mediator, ILogger<FintaWebSocketService> logger, FintaAuthService authService)
+        {
+            _baseWebSocketUrl = webSocketUrl;
             _mediator = mediator;
             _logger = logger;
+            _authService = authService;
         }
 
         public async Task StartAsync()
@@ -33,10 +40,19 @@ namespace MarketPriceApi.Services.WebSocket
 
             try
             {
-                await _webSocket.ConnectAsync(new Uri(_webSocketUrl), _cancellationTokenSource.Token);
+                // Получаем токен доступа
+                var token = await _authService.GetAccessTokenAsync();
+                var webSocketUrl = $"{_baseWebSocketUrl}/api/streaming/ws/v1/realtime?token={token}";
+                
+                _logger.LogInformation("Attempting to connect to WebSocket with token: {TokenPrefix}...", token.Substring(0, Math.Min(20, token.Length)));
+                
+                await _webSocket.ConnectAsync(new Uri(webSocketUrl), _cancellationTokenSource.Token);
                 _isConnected = true;
 
-                _logger.LogInformation("WebSocket connected to {WebSocketUrl}", _webSocketUrl);
+                _logger.LogInformation("WebSocket connected to {WebSocketUrl}", webSocketUrl);
+
+                // Автоматическая подписка на популярные символы
+                await SubscribeToDefaultSymbolsAsync();
 
                 // Запускаем обработку сообщений
                 _ = Task.Run(() => ReceiveMessagesAsync(_cancellationTokenSource.Token));
@@ -74,7 +90,10 @@ namespace MarketPriceApi.Services.WebSocket
         public async Task SubscribeToSymbolAsync(string symbol, string provider)
         {
             if (!_isConnected || _webSocket == null)
+            {
+                _logger.LogWarning("WebSocket is not connected. Cannot subscribe to {Symbol}", symbol);
                 return;
+            }
 
             var subscribeMessage = new
             {
@@ -94,6 +113,22 @@ namespace MarketPriceApi.Services.WebSocket
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to subscribe to symbol {Symbol}", symbol);
+            }
+        }
+
+        private async Task SubscribeToDefaultSymbolsAsync()
+        {
+            foreach (var symbol in _defaultSymbols)
+            {
+                try
+                {
+                    await SubscribeToSymbolAsync(symbol, "oanda");
+                    await Task.Delay(100); // Небольшая задержка между подписками
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to subscribe to default symbol {Symbol}", symbol);
+                }
             }
         }
 
@@ -126,12 +161,22 @@ namespace MarketPriceApi.Services.WebSocket
             }
 
             _isConnected = false;
+            
+            // Попытка переподключения через 30 секунд
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogInformation("Attempting to reconnect WebSocket in 30 seconds...");
+                await Task.Delay(30000, cancellationToken);
+                await StartAsync();
+            }
         }
 
         private async Task ProcessMessageAsync(string message)
         {
             try
             {
+                _logger.LogDebug("Received WebSocket message: {Message}", message);
+                
                 // Парсим сообщение от WebSocket
                 var priceData = JsonSerializer.Deserialize<WebSocketPriceData>(message);
                 
@@ -152,6 +197,7 @@ namespace MarketPriceApi.Services.WebSocket
                     };
 
                     await _mediator.Send(command);
+                    _logger.LogDebug("Saved price for {Symbol}: {Price}", priceData.Symbol, priceData.Close);
                 }
             }
             catch (Exception ex)
@@ -159,6 +205,8 @@ namespace MarketPriceApi.Services.WebSocket
                 _logger.LogError(ex, "Error processing WebSocket message: {Message}", message);
             }
         }
+
+        public bool IsConnected => _isConnected;
 
         private class WebSocketPriceData
         {

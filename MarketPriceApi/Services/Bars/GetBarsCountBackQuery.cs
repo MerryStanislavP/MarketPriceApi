@@ -26,6 +26,9 @@ namespace MarketPriceApi.Services.Bars
             int barsCount)
         {
             var token = await _authService.GetAccessTokenAsync();
+            
+            // Очищаем заголовки перед установкой нового токена
+            _httpClient.DefaultRequestHeaders.Authorization = null;
             _httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
 
             var baseUrl = _configuration["Finta:BaseUrl"];
@@ -34,7 +37,8 @@ namespace MarketPriceApi.Services.Bars
 
             if (!response.IsSuccessStatusCode)
             {
-                throw new Exception($"Failed to get bars count back: {response.StatusCode}");
+                var errorContent = await response.Content.ReadAsStringAsync();
+                throw new Exception($"Failed to get bars count back: {response.StatusCode}. Response: {errorContent}");
             }
 
             var jsonResponse = await response.Content.ReadAsStringAsync();

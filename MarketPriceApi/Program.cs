@@ -14,7 +14,7 @@ namespace MarketPriceApi
 {
     public class Program
     {
-        public static void Main(string[] args)
+        public static async Task Main(string[] args)
         {
             var builder = WebApplication.CreateBuilder(args);
 
@@ -36,10 +36,15 @@ namespace MarketPriceApi
             });
 
             // Регистрация сервисов аутентификации
-            builder.Services.AddScoped<FintaAuthService>();
+            builder.Services.AddSingleton<FintaAuthService>();
 
             // Регистрация сервисов инструментов
-            builder.Services.AddScoped<GetInstrumentsQuery>();
+            builder.Services.AddScoped<GetInstrumentsQuery>(provider =>
+                new GetInstrumentsQuery(
+                    provider.GetRequiredService<HttpClient>(),
+                    provider.GetRequiredService<FintaAuthService>(),
+                    provider.GetRequiredService<IConfiguration>(),
+                    provider.GetRequiredService<ILogger<GetInstrumentsQuery>>()));
             builder.Services.AddScoped<GetProvidersQuery>();
             builder.Services.AddScoped<GetExchangesQuery>();
 
@@ -53,7 +58,8 @@ namespace MarketPriceApi
                 new FintaWebSocketService(
                     provider.GetRequiredService<IConfiguration>()["Finta:WebSocketUrl"],
                     provider.GetRequiredService<IMediator>(),
-                    provider.GetRequiredService<ILogger<FintaWebSocketService>>()));
+                    provider.GetRequiredService<ILogger<FintaWebSocketService>>(),
+                    provider.GetRequiredService<FintaAuthService>()));
 
             // Регистрация сервиса синхронизации
             builder.Services.AddScoped<FintaSyncService>();
@@ -82,6 +88,56 @@ namespace MarketPriceApi
                 db.Database.Migrate();
             }
 
+            // Автоматический запуск WebSocket сервиса
+            using (var scope = app.Services.CreateScope())
+            {
+                var webSocketService = scope.ServiceProvider.GetRequiredService<FintaWebSocketService>();
+                var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+                
+                try
+                {
+                    await webSocketService.StartAsync();
+                    logger.LogInformation("WebSocket service started automatically");
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Failed to start WebSocket service automatically");
+                }
+            }
+
+            // Фоновая синхронизация данных для заполнения кеша
+            using (var scope = app.Services.CreateScope())
+            {
+                var syncService = scope.ServiceProvider.GetRequiredService<FintaSyncService>();
+                var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+                
+                try
+                {
+                    // Синхронизируем инструменты
+                    var syncedCount = await syncService.SyncInstrumentsAsync("oanda", "forex");
+                    logger.LogInformation("Synced {Count} instruments", syncedCount);
+                    
+                    // Синхронизируем цены для популярных пар
+                    var popularSymbols = new[] { "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF" };
+                    foreach (var symbol in popularSymbols)
+                    {
+                        try
+                        {
+                            await syncService.SyncPricesForSymbolAsync(symbol, "oanda", "1m");
+                            logger.LogInformation("Synced prices for {Symbol}", symbol);
+                        }
+                        catch (Exception ex)
+                        {
+                            logger.LogWarning(ex, "Failed to sync prices for {Symbol}", symbol);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Failed to perform initial data sync");
+                }
+            }
+
             // Configure the HTTP request pipeline.
             if (app.Environment.IsDevelopment())
             {
@@ -98,7 +154,7 @@ namespace MarketPriceApi
 
             app.MapControllers();
 
-            app.Run();
+            await app.RunAsync();
         }
     }
 }

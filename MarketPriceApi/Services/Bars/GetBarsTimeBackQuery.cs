@@ -26,6 +26,9 @@ namespace MarketPriceApi.Services.Bars
             TimeSpan timeBack)
         {
             var token = await _authService.GetAccessTokenAsync();
+            
+            // Очищаем заголовки перед установкой нового токена
+            _httpClient.DefaultRequestHeaders.Authorization = null;
             _httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
 
             var timeBackString = $"{timeBack.Days}.{timeBack.Hours:D2}:{timeBack.Minutes:D2}:{timeBack.Seconds:D2}";
@@ -36,7 +39,8 @@ namespace MarketPriceApi.Services.Bars
 
             if (!response.IsSuccessStatusCode)
             {
-                throw new Exception($"Failed to get bars time back: {response.StatusCode}");
+                var errorContent = await response.Content.ReadAsStringAsync();
+                throw new Exception($"Failed to get bars time back: {response.StatusCode}. Response: {errorContent}");
             }
 
             var jsonResponse = await response.Content.ReadAsStringAsync();

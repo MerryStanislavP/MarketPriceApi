@@ -3,21 +3,20 @@ using MarketPriceApi.Models;
 using MarketPriceApi.Models.DTOs;
 using MarketPriceApi.Persistence;
 using MarketPriceApi.Services.Bars;
-using MarketPriceApi.Services.Auth;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Distributed;
 using System.Text.Json;
 
 namespace MarketPriceApi.Services.Prices
 {
-    public class GetCurrentPriceQuery : IRequest<PriceDto?>
+    public class GetCurrentPriceQuery : IRequest<CurrentPriceDto?>
     {
         public string Symbol { get; set; } = string.Empty;
         public string Provider { get; set; } = string.Empty;
         public string Interval { get; set; } = "1m";
     }
 
-    public class GetCurrentPriceQueryHandler : IRequestHandler<GetCurrentPriceQuery, PriceDto?>
+    public class GetCurrentPriceQueryHandler : IRequestHandler<GetCurrentPriceQuery, CurrentPriceDto?>
     {
         private readonly AppDbContext _context;
         private readonly IDistributedCache _cache;
@@ -33,7 +32,7 @@ namespace MarketPriceApi.Services.Prices
             _barsQuery = barsQuery;
         }
 
-        public async Task<PriceDto?> Handle(GetCurrentPriceQuery request, CancellationToken cancellationToken)
+        public async Task<CurrentPriceDto?> Handle(GetCurrentPriceQuery request, CancellationToken cancellationToken)
         {
             // Создаем ключ кеша
             var cacheKey = $"current_price:{request.Symbol}:{request.Provider}:{request.Interval}";
@@ -42,7 +41,7 @@ namespace MarketPriceApi.Services.Prices
             var cachedResult = await _cache.GetStringAsync(cacheKey, cancellationToken);
             if (!string.IsNullOrEmpty(cachedResult))
             {
-                return JsonSerializer.Deserialize<PriceDto>(cachedResult);
+                return JsonSerializer.Deserialize<CurrentPriceDto>(cachedResult);
             }
 
             // Получаем актив
@@ -58,12 +57,11 @@ namespace MarketPriceApi.Services.Prices
                 .OrderByDescending(p => p.Timestamp)
                 .FirstOrDefaultAsync(cancellationToken);
 
-            // Если цена устарела (старше 5 минут для 1m интервала), получаем свежую
-            if (latestPrice == null || DateTime.UtcNow - latestPrice.Timestamp > TimeSpan.FromMinutes(5))
+            // Если цена устарела (старше 5 минут для 1m интервала), получаем свежую из API
+            if (latestPrice == null || IsPriceOutdated(latestPrice.Timestamp, request.Interval))
             {
                 try
                 {
-                    // Получаем свежую цену из Fintacharts API
                     var barsResponse = await _barsQuery.GetBarsCountBackAsync(
                         instrumentId: asset.Symbol,
                         provider: request.Provider,
@@ -97,36 +95,50 @@ namespace MarketPriceApi.Services.Prices
                 }
                 catch (Exception)
                 {
-                    // Если не удалось получить свежую цену, используем последнюю из БД
-                    if (latestPrice == null)
-                        return null;
+                    // Если не удалось получить данные из API, используем то что есть в БД
                 }
             }
 
             if (latestPrice == null)
                 return null;
 
-            var result = new PriceDto
+            var result = new CurrentPriceDto
             {
-                Id = latestPrice.Id,
-                AssetId = latestPrice.AssetId,
+                AssetId = asset.Id,
                 Symbol = asset.Symbol,
+                Price = latestPrice.Close,
                 Open = latestPrice.Open,
                 High = latestPrice.High,
                 Low = latestPrice.Low,
-                Close = latestPrice.Close,
                 Volume = latestPrice.Volume,
                 Interval = latestPrice.Interval,
                 Provider = latestPrice.Provider,
-                Timestamp = latestPrice.Timestamp
+                LastUpdated = latestPrice.Timestamp
             };
 
-            // Кешируем результат на 1 минуту
+            // Кешируем результат на 1 минуту для текущих цен
             await _cache.SetStringAsync(cacheKey, JsonSerializer.Serialize(result), 
                 new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(1) }, 
                 cancellationToken);
 
             return result;
+        }
+
+        private static bool IsPriceOutdated(DateTime priceTimestamp, string interval)
+        {
+            var maxAge = interval switch
+            {
+                "1m" => TimeSpan.FromMinutes(5),
+                "5m" => TimeSpan.FromMinutes(10),
+                "15m" => TimeSpan.FromMinutes(20),
+                "30m" => TimeSpan.FromMinutes(40),
+                "1h" => TimeSpan.FromHours(2),
+                "4h" => TimeSpan.FromHours(6),
+                "1d" => TimeSpan.FromDays(2),
+                _ => TimeSpan.FromMinutes(5)
+            };
+
+            return DateTime.UtcNow - priceTimestamp > maxAge;
         }
 
         private static int GetIntervalMinutes(string interval)

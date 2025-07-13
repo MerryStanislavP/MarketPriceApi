@@ -3,7 +3,6 @@ using MarketPriceApi.Models;
 using MarketPriceApi.Persistence;
 using MarketPriceApi.Services.Instruments;
 using MarketPriceApi.Services.Auth;
-using MarketPriceApi.Configuration;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
